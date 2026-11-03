@@ -1,110 +1,136 @@
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const usuariosModel = require("../models/usuariosModel");
-const listarUsuarios = require("../models/usuariosModel")
-// =====================================================
-// POST /api/usuarios/registro
-// =====================================================
+const {
+    listarUsuarios,
+    buscarUsuario,
+    crearUsuario,
+    actualizarUsuario,
+    eliminarUsuario
+} = require("../modelsService/usuarioService");
 
-const registrar = async (req, res) => {
+// Convierte el :id de la URL a número. Devuelve null si no es válido.
+const leerId = (req) => {
+    const id = Number(req.params.id);
+    return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+// ---------- READ (todos) ----------
+const listarController = async (req, res) => {
     try {
-        const { nombre, email, password } = req.body;
-
-        if (!nombre || !email || !password) {
-            return res.status(400).json({
-                mensaje: "Nombre, email y password son obligatorios"
-            });
-        }
-
-        const existente = usuariosModel.buscarPorEmail(email);
-
-        if (existente) {
-            return res.status(409).json({
-                mensaje: "Ya existe un usuario registrado con ese email"
-            });
-        }
-
-        const salt = await bcrypt.genSalt(10);
-        const passwordHash = await bcrypt.hash(password, salt);
-
-        const nuevoUsuario = usuariosModel.crearUsuario({
-            nombre,
-            email,
-            password: passwordHash
-        });
-
-        res.status(201).json({
-            mensaje: "Usuario registrado correctamente",
-            usuario: {
-                id: nuevoUsuario.id,
-                nombre: nuevoUsuario.nombre,
-                email: nuevoUsuario.email
-            }
-        });
-
+        const usuarios = await listarUsuarios();
+        res.status(200).json(usuarios);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ mensaje: "Error al registrar el usuario" });
+        res.status(500).json({ Error: error.message });
     }
 };
 
-// =====================================================
-// POST /api/usuarios/login
-// =====================================================
-
-const iniciarSesion = async (req, res) => {
+// ---------- READ (uno) ----------
+const listarUno = async (req, res) => {
     try {
-        const { email, password } = req.body;
-
-        if (!email || !password) {
-            return res.status(400).json({
-                mensaje: "Email y password son obligatorios"
-            });
+        const id = leerId(req);
+        if (!id) {
+            return res.status(400).json({ Error: "El id debe ser un número válido" });
         }
 
-        const usuario = usuariosModel.buscarPorEmail(email);
-
+        const usuario = await buscarUsuario(id);
         if (!usuario) {
-            return res.status(401).json({ mensaje: "Credenciales inválidas" });
+            return res.status(404).json({ Error: "Usuario no encontrado" });
         }
 
-        const passwordValido = await bcrypt.compare(password, usuario.password);
-
-        if (!passwordValido) {
-            return res.status(401).json({ mensaje: "Credenciales inválidas" });
-        }
-
-        const token = jwt.sign(
-            { id: usuario.id, email: usuario.email, nombre: usuario.nombre },
-            process.env.JWT_SECRET,
-            { expiresIn: "1h" }
-        );
-
-        res.status(200).json({
-            mensaje: "Sesión iniciada correctamente",
-            token
-        });
-
+        res.status(200).json(usuario);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ mensaje: "Error al iniciar sesión" });
+        res.status(500).json({ Error: error.message });
     }
 };
 
-//listar todos los usuario
-const listarController = async(req, res)=>{
-    const usuarios = await listarUsuarios
+// ---------- CREATE ----------
+const crear = async (req, res) => {
     try {
-        //solicitar servicio, o modelo de bd
-        res.status(200).json({Listado: usuarios})
+        const { email, name, clave } = req.body;
+
+        if (!email || !clave) {
+            return res.status(400).json({ Error: "email y clave son obligatorios" });
+        }
+
+        // Guardamos la clave encriptada, nunca en texto plano
+        const claveHash = await bcrypt.hash(clave, 10);
+
+        const userNew = await crearUsuario(email, name, claveHash);
+
+        // Quitamos la clave antes de responder
+        const { clave: _clave, ...usuarioSinClave } = userNew;
+
+        res.status(201).json({ mensaje: "Usuario creado", userNew: usuarioSinClave });
     } catch (error) {
-       res.status(500).json({Error: error.message}) 
+        // P2002 = email repetido (campo @unique)
+        if (error.code === "P2002") {
+            return res.status(409).json({ Error: "Ese email ya está registrado" });
+        }
+        res.status(500).json({ Error: error.message });
     }
-    
-}
+};
+
+// ---------- UPDATE ----------
+const actualizar = async (req, res) => {
+    try {
+        const id = leerId(req);
+        if (!id) {
+            return res.status(400).json({ Error: "El id debe ser un número válido" });
+        }
+
+        const { email, name, clave } = req.body;
+
+        // Solo actualizamos lo que venga en el body
+        const datos = {};
+        if (email !== undefined) datos.email = email;
+        if (name !== undefined) datos.name = name;
+        if (clave !== undefined) datos.clave = await bcrypt.hash(clave, 10);
+
+        if (Object.keys(datos).length === 0) {
+            return res.status(400).json({ Error: "Envía al menos un campo: email, name o clave" });
+        }
+
+        const usuario = await actualizarUsuario(id, datos);
+        res.status(200).json({ mensaje: "Usuario actualizado", usuario });
+    } catch (error) {
+        // P2025 = no existe ese registro
+        if (error.code === "P2025") {
+            return res.status(404).json({ Error: "Usuario no encontrado" });
+        }
+        // P2002 = email repetido
+        if (error.code === "P2002") {
+            return res.status(409).json({ Error: "Ese email ya está registrado" });
+        }
+        res.status(500).json({ Error: error.message });
+    }
+};
+
+// ---------- DELETE ----------
+const eliminar = async (req, res) => {
+    try {
+        const id = leerId(req);
+        if (!id) {
+            return res.status(400).json({ Error: "El id debe ser un número válido" });
+        }
+
+        const usuario = await eliminarUsuario(id);
+        res.status(200).json({ mensaje: "Usuario eliminado", usuario });
+    } catch (error) {
+        // P2025 = no existe ese registro
+        if (error.code === "P2025") {
+            return res.status(404).json({ Error: "Usuario no encontrado" });
+        }
+        // P2003 = el usuario tiene posts relacionados
+        if (error.code === "P2003") {
+            return res.status(409).json({ Error: "No se puede eliminar: el usuario tiene posts asociados" });
+        }
+        res.status(500).json({ Error: error.message });
+    }
+};
 
 module.exports = {
-    registrar,
-    iniciarSesion,
-    listarController
+    listarController,
+    listarUno,
+    crear,
+    actualizar,
+    eliminar
 };
